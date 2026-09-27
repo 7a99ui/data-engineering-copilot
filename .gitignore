@@ -1,0 +1,20 @@
+# Environnement Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Configuration sensible
+.env
+
+# Docker
+docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
