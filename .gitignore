@@ -5,7 +5,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# Configuration sensible
+# Configuration sensible — ne JAMAIS committer
 .env
 
 # Docker
@@ -15,6 +15,9 @@ docker-compose.override.yml
 .vscode/
 .idea/
 
-# OS
-.DS_Store
+# OS Windows
 Thumbs.db
+desktop.ini
+
+# Données locales
+docs/
