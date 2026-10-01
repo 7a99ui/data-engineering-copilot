@@ -1,17 +1,25 @@
-# httpx pour appeler Ollama
-import httpx
+# CrossEncoder de sentence-transformers
+# c'est le vrai modèle de reranking — lit question + chunk ENSEMBLE
+# contrairement au BiEncoder qui les encode séparément
+from sentence_transformers import CrossEncoder
 
-# settings pour l'URL d'Ollama
-from app.config import settings
+# Le modèle standard de reranking en production RAG
+# entraîné sur MS MARCO — dataset de 500k paires question/passage
+# taille : ~86MB — beaucoup plus léger que les LLMs
+# téléchargé automatiquement au premier appel depuis HuggingFace
+MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Chargement du modèle UNE SEULE FOIS au démarrage — pattern Singleton
+# comme ollama_client et le modèle d'embeddings
+# évite de recharger 86MB à chaque requête
+cross_encoder = CrossEncoder(MODEL_NAME)
 
 
 async def rerank(question: str, chunks: list[dict], top_k: int = 3) -> list[dict]:
     """
-    Reranker basé sur Ollama — évalue la pertinence de chaque chunk
-    par rapport à la question en les lisant ENSEMBLE.
-
-    Approche : on demande au LLM de scorer chaque paire (question, chunk)
-    de 0 à 10. Plus robuste que sentence-transformers sur Windows.
+    Reranke les chunks avec le vrai modèle CrossEncoder.
+    Évalue chaque paire (question, chunk) ENSEMBLE dans le même modèle.
+    Beaucoup plus précis que le scoring via LLM.
 
     question : la question de l'utilisateur
     chunks   : les chunks fusionnés par RRF (top-6)
@@ -20,83 +28,56 @@ async def rerank(question: str, chunks: list[dict], top_k: int = 3) -> list[dict
     """
 
     # Si pas assez de chunks → retourner directement sans reranker
-    # pas besoin de reranker si on a déjà peu de chunks
     if len(chunks) <= top_k:
         return chunks
 
-    # Liste pour accumuler les scores de pertinence
-    scored_chunks = []
+    # ── Construire les paires (question, chunk) ──
+    # CrossEncoder attend une liste de tuples (texte1, texte2)
+    # il lira les deux ENSEMBLE dans le même passage du modèle
+    # c'est fondamentalement différent du BiEncoder qui les encode séparément
+    pairs = [
+        (question, chunk["payload"]["text"])
+        for chunk in chunks
+    ]
 
-    for chunk in chunks:
-        # Extraire le texte du chunk
-        text = chunk["payload"]["text"]
+    # ── Calculer les scores CrossEncoder ──
+    # model.predict() retourne un tableau numpy de scores
+    # un score par paire — pas de limite de valeur (peut être négatif)
+    # score élevé = chunk très pertinent pour cette question
+    # score négatif = chunk peu ou pas pertinent
+    # ex: [2.4, -1.2, 0.8, -3.5, 1.1, -0.3]
+    scores = cross_encoder.predict(pairs)
 
-        # ── Construire le prompt de scoring ──
-        # On demande au LLM d'évaluer la pertinence de 0 à 10
-        # Le LLM lit la question ET le chunk ensemble → CrossEncoder-like
-        scoring_prompt = f"""Rate the relevance of the following passage to answer the question.
-Respond with ONLY a number from 0 to 10.
-0 = completely irrelevant
-5 = somewhat relevant
-10 = perfectly answers the question
+    # ── Associer chaque chunk à son score ──
+    # zip() associe chunk[0] avec scores[0], chunk[1] avec scores[1]...
+    # float() convertit le score numpy en float Python standard
+    scored_chunks = [
+        {
+            # score brut du CrossEncoder — peut être négatif
+            # on le garde tel quel pour le tri
+            "raw_score": float(scores[i]),
 
-Question: {question}
+            # score normalisé entre 0 et 1 avec sigmoid
+            # sigmoid(x) = 1 / (1 + e^(-x))
+            # transforme n'importe quel score en valeur 0-1
+            # score 0   → sigmoid = 0.50
+            # score 2   → sigmoid = 0.88
+            # score -2  → sigmoid = 0.12
+            # cohérent avec les autres scores du système
+            "score"    : float(1 / (1 + 2.718 ** (-scores[i]))),
 
-Passage: {text[:500]}
+            # conserver le payload complet (texte + métadonnées)
+            "payload"  : chunks[i]["payload"],
 
-Relevance score (0-10):"""
+            # conserver le score RRF original pour traçabilité
+            "rrf_score": chunks[i]["score"]
+        }
+        for i in range(len(chunks))
+    ]
 
-        # ── Appeler Ollama pour scorer ce chunk ──
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model" : settings.LLM_MODEL,
-                    "prompt": scoring_prompt,
-                    "stream": False,
-                    "options": {
-                        # temperature=0 → réponse totalement déterministe
-                        # on veut toujours le même score pour le même chunk
-                        "temperature": 0.0,
+    # ── Trier par score décroissant ──
+    # le chunk le plus pertinent pour la question sera en premier
+    scored_chunks.sort(key=lambda x: x["raw_score"], reverse=True)
 
-                        # num_predict=3 → on attend juste "7" ou "10"
-                        # pas besoin d'une longue réponse
-                        "num_predict": 3
-                    }
-                }
-            )
-
-        # Extraire le texte de la réponse
-        raw_score = response.json()["response"].strip()
-
-        # ── Parser le score ──
-        # Le LLM peut répondre "8", "8/10", "8." etc.
-        # on extrait juste le premier nombre trouvé
-        try:
-            # Prendre uniquement les chiffres de la réponse
-            # ex: "8/10" → "8", "7." → "7"
-            score_str = ''.join(filter(str.isdigit, raw_score.split()[0]))
-            score = float(score_str) if score_str else 5.0
-
-            # S'assurer que le score est entre 0 et 10
-            score = max(0.0, min(10.0, score))
-
-        except (ValueError, IndexError):
-            # Si le LLM ne retourne pas un nombre → score neutre de 5
-            score = 5.0
-
-        scored_chunks.append({
-            # Normaliser le score entre 0 et 1 (diviser par 10)
-            # pour cohérence avec les autres scores du système
-            "score"  : score / 10.0,
-            "payload": chunk["payload"],
-
-            # Garder aussi le score RRF original pour debug
-            "rrf_score": chunk["score"]
-        })
-
-    # ── Trier par score de pertinence décroissant ──
-    scored_chunks.sort(key=lambda x: x["score"], reverse=True)
-
-    # Retourner seulement les top_k meilleurs
+    # ── Retourner les top_k meilleurs ──
     return scored_chunks[:top_k]

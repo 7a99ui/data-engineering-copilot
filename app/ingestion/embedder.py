@@ -1,33 +1,47 @@
-import httpx
-from app.config import settings
-# Le nom du modèle d'embeddings
-EMBEDDING_MODEL = "nomic-embed-text"
+from sentence_transformers import SentenceTransformer
 
-# Elle prend une liste de textes et retourne une liste de listes de nombres. Chaque texte donne une liste de 768 nombres.
+# nomic-embed-text-v1.5 — version améliorée du modèle utilisé avant
+# même 768 dimensions — compatible avec la collection Qdrant existante
+# exécuté localement en RAM — pas d'appel HTTP à Ollama
+# trust_remote_code=True requis — le modèle a du code personnalisé sur HuggingFace
+MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+
+# Chargement une seule fois au démarrage — pattern Singleton
+# ~270MB en RAM — chargé une seule fois pour toute la durée de vie de l'app
+model = SentenceTransformer(MODEL_NAME, trust_remote_code=True)
+
+# Prefix pour l'ingestion — spécificité de nomic-embed-text-v1.5
+# "search_document:" indique au modèle que ce texte sera stocké et cherché
+# améliore la qualité des embeddings pour la recherche documentaire
+DOCUMENT_PREFIX = "search_document: "
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    embeddings = [] # Liste vide qu'on va remplir — un vecteur par texte.
+    """
+    Génère les embeddings localement via sentence-transformers.
+    Traite tous les textes en batch — beaucoup plus rapide
+    qu'un appel HTTP par texte comme avant avec Ollama.
 
-    for i, text in enumerate(texts): # enumerate donne en même temps l'index i (0, 1, 2...) et le texte. On a besoin de i uniquement pour afficher la progression.
-        print(f"   embedding {i+1}/{len(texts)}...", end="\r") # Affiche la progression dans le terminal.
-        
-        # L'appel à Ollama
-        response = httpx.post( # envoie le texte à Ollama
-            f"{settings.OLLAMA_BASE_URL}/api/embeddings",
-            json={
-                "model": EMBEDDING_MODEL,
-                "prompt": text
-            },
-            timeout=30 # si Ollama ne répond pas en 30 secondes pour un embedding, on abandonne. Les embeddings sont rapides donc 30 secondes est largement suffisant.
-        )
-        # La réponse d'Ollama
-        response.raise_for_status() # vérifie qu'il n'y a pas d'erreur
-        embeddings.append(response.json()["embedding"]) # ajoute le vecteur à la boîte
-        """ 
-        Ollama retourne un JSON qui ressemble à :
-        {
-         "embedding": [0.21, -0.54, 0.87, 0.03, 0.69, -0.12, ...]
-        }
-        """
+    texts : liste de textes à vectoriser (chunks de documents)
+    -> list : liste de vecteurs de 768 dimensions
+    """
 
-    print(f"   ✅ {len(embeddings)} embeddings générés")
-    return embeddings # retourne tous les vecteurs
+    # Ajouter le prefix "search_document:" à chaque chunk
+    # POURQUOI : nomic-embed-text-v1.5 a été entraîné avec ces prefixes
+    # "search_document:" → dit au modèle "ce texte sera cherché plus tard"
+    # sans prefix → embeddings moins précis pour la recherche
+    prefixed_texts = [DOCUMENT_PREFIX + text for text in texts]
+
+    # encode() traite tout le batch en parallèle en RAM
+    # AVANTAGE vs Ollama HTTP : pas de latence réseau, traitement parallèle
+    # show_progress_bar=True → barre de progression visible pendant l'ingestion
+    # convert_to_numpy=True → tableau numpy, plus facile à manipuler
+    embeddings = model.encode(
+        prefixed_texts,
+        show_progress_bar=True,
+        convert_to_numpy=True
+    )
+
+    # .tolist() convertit numpy array → liste Python standard
+    # Qdrant attend une liste Python, pas un tableau numpy
+    return embeddings.tolist()
