@@ -9,14 +9,16 @@ from pydantic import BaseModel
 from app.llm.client import ollama_client
 
 # Le pipeline RAG complet — orchestrate retriever + generator
-# utilisé pour la nouvelle route /ask (Sprint 3)
+# utilisé pour la route /ask (Sprint 3 et 4)
 from app.rag.pipeline import rag_pipeline
 
+# Le graphe LangGraph — instance unique compilée au démarrage
+# utilisé pour la nouvelle route /agent (Sprint 5)
+from app.agent.graph import agent_graph
+
 # ── Création de l'application ──
-# FastAPI() crée l'objet central de l'API
-# title et version apparaissent dans la page /docs (Swagger)
-# on passe de 0.1.0 à 0.2.0 car on ajoute une fonctionnalité majeure (RAG)
-app = FastAPI(title="Data Engineering Copilot", version="0.2.0")
+# on passe à 0.3.0 car on ajoute l'agent LangGraph — fonctionnalité majeure
+app = FastAPI(title="Data Engineering Copilot", version="0.3.0")
 
 
 # ════════════════════════════════════════
@@ -32,32 +34,29 @@ class ChatResponse(BaseModel):
     # Ce que l'API retourne pour /chat
     # la réponse du LLM + le nom du modèle utilisé
     answer: str
-    model: str
+    model : str
 
 
 # ════════════════════════════════════════
-# MODÈLES DE DONNÉES — Sprint 3 (/ask)
+# MODÈLES DE DONNÉES — Sprint 3 & 4 (/ask)
 # ════════════════════════════════════════
 
 class AskRequest(BaseModel):
     # Ce que l'API attend pour /ask
     # question : la question de l'utilisateur en anglais
-    # k : combien de chunks récupérer dans Qdrant (défaut 3)
-    #     valeur par défaut = 3 → optionnel dans la requête JSON
+    # k        : combien de chunks récupérer dans Qdrant (défaut 3)
+    # mode     : "hybrid" (Sprint 4) ou "dense" (Sprint 3)
     question: str
-    k: int = 3
-    # mode de retrieval — "hybrid" par défaut (Sprint 4)
-    # "dense" → Sprint 3 pour comparaison
-    # Literal["hybrid", "dense"] → Pydantic accepte SEULEMENT ces deux valeurs
+    k   : int = 3
     mode: str = "hybrid"
 
 class SourceItem(BaseModel):
     # Représente UNE source utilisée pour répondre
-    # retournée dans la liste "sources" de AskResponse
-    # source      : nom du fichier (ex: "spark.md")
-    # page        : numéro de page dans le document
-    # score       : score de similarité cosine (0.0 à 1.0)
-    # chunk       : extrait du texte utilisé (150 premiers caractères)
+    # utilisée dans AskResponse ET AgentResponse
+    # source : nom du fichier (ex: "spark.md")
+    # page   : numéro de page dans le document
+    # score  : score de pertinence (cosine ou CrossEncoder)
+    # chunk  : extrait des 150 premiers caractères du chunk
     source: str
     page  : int
     score : float
@@ -66,13 +65,39 @@ class SourceItem(BaseModel):
 class AskResponse(BaseModel):
     # Ce que l'API retourne pour /ask
     # answer  : la réponse générée par le LLM à partir des documents
-    # sources : liste des chunks utilisés pour répondre (avec scores)
+    # sources : liste des chunks utilisés avec leurs scores
     # model   : le nom du modèle LLM utilisé
+    # mode    : la stratégie utilisée ("hybrid" ou "dense")
     answer : str
     sources: list[SourceItem]
     model  : str
-    # retourner le mode utilisé pour transparence
-    mode: str
+    mode   : str
+
+
+# ════════════════════════════════════════
+# MODÈLES DE DONNÉES — Sprint 5 (/agent)
+# ════════════════════════════════════════
+
+class AgentRequest(BaseModel):
+    # Ce que l'API attend pour /agent
+    # un seul champ — l'agent décide lui-même comment répondre
+    question: str
+
+class AgentResponse(BaseModel):
+    # Ce que l'API retourne pour /agent
+    # answer  : la réponse générée (RAG ou directe selon l'intent)
+    # intent  : l'intent classifié par l'agent
+    #           "rag_search" | "direct_answer" | "chitchat"
+    # sources : les chunks utilisés (vide si pas de RAG)
+    # steps   : le chemin parcouru dans le graphe LangGraph
+    #           ex: ["analyze_intent", "rag_search", "format_response"]
+    #           utile pour le debug et la traçabilité
+    # model   : le nom du modèle LLM utilisé
+    answer : str
+    intent : str
+    sources: list[SourceItem]
+    steps  : list[str]
+    model  : str
 
 
 # ════════════════════════════════════════
@@ -84,57 +109,95 @@ class AskResponse(BaseModel):
 async def health():
     # Route la plus simple — vérifie que l'API tourne
     # utilisée par Docker, outils de monitoring, ou manuellement
-    # ne nécessite aucun paramètre, retourne toujours {"status": "ok"}
+    # retourne toujours {"status": "ok"}
     return {"status": "ok"}
 
 
 # ── Route /chat — Sprint 1 ──
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # route du Sprint 1 — LLM seul sans RAG
-    # répond avec sa culture générale, pas avec tes documents
-    # toujours utile pour des questions générales
+    # LLM seul sans RAG — répond avec sa culture générale
+    # toujours utile pour des questions générales non liées aux docs
 
-    # request.question : le texte extrait du JSON entrant par Pydantic
-    # ollama_client.chat() : appelle Ollama via HTTP (voir client.py)
-    # await : attend la réponse sans bloquer le serveur
+    # ollama_client.chat() appelle Ollama via HTTP (voir client.py)
+    # await attend la réponse sans bloquer le serveur
     answer = await ollama_client.chat(request.question)
 
-    # on retourne un ChatResponse — Pydantic valide que answer et model
-    # sont bien des strings avant d'envoyer la réponse JSON
     return ChatResponse(
         answer=answer,
-        model=ollama_client.model
+        model =ollama_client.model
     )
 
 
-# ── Route /ask — Sprint 3 (RAG) ──
+# ── Route /ask — Sprint 3 & 4 (RAG) ──
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest):
-    # route principale du Sprint 3 — LLM + RAG
-    # répond à partir de TES documents stockés dans Qdrant
-    # retourne la réponse + les sources utilisées + les scores
+    # Pipeline RAG fixe — toujours le même chemin :
+    # retrieve → augment → generate
+    # mode "hybrid" → Dense + BM25 + RRF + CrossEncoder (Sprint 4)
+    # mode "dense"  → Dense seul (Sprint 3) pour comparaison
 
-    # rag_pipeline() orchestre les 3 étapes :
-    # 1. retrieve  → vectorise la question, cherche dans Qdrant
-    # 2. augment   → construit le prompt avec le contexte trouvé
-    # 3. generate  → appelle le LLM avec le prompt enrichi
-    # request.question : la question de l'utilisateur
-    # request.k        : nombre de chunks à récupérer (défaut 3)
     result = await rag_pipeline(
         question=request.question,
-        k=request.k,
-        mode=request.mode      # ← nouveau paramètre
+        k       =request.k,
+        mode    =request.mode
     )
 
-    # result est un dict avec 3 clés : answer, sources, model
-    # on construit un AskResponse — Pydantic valide chaque champ
-    # SourceItem(**s) déverse chaque dict source dans un objet SourceItem
+    # SourceItem(**s) déverse chaque dict source dans un objet Pydantic
     # ex: {"source": "spark.md", "page": 1, "score": 0.94, "chunk": "..."}
     #     devient SourceItem(source="spark.md", page=1, score=0.94, chunk="...")
     return AskResponse(
         answer =result["answer"],
         sources=[SourceItem(**s) for s in result["sources"]],
         model  =result["model"],
-        mode   =result["mode"]  # ← nouveau champ
+        mode   =result["mode"]
+    )
+
+
+# ── Route /agent — Sprint 5 (LangGraph) ──
+@app.post("/agent", response_model=AgentResponse)
+async def agent(request: AgentRequest):
+    # Agent LangGraph — pipeline intelligent qui s'adapte à la question
+    # Différence clé vs /ask :
+    # /ask  → toujours RAG, toujours le même chemin
+    # /agent → analyse l'intent d'abord, choisit la meilleure stratégie
+
+    # ── État initial du graphe ──
+    # On fournit uniquement ce qu'on sait au départ
+    # Les autres champs (intent, chunks, answer, sources)
+    # seront remplis par les nœuds au fil de l'exécution
+    initial_state = {
+        "question": request.question,
+        "intent"  : None,   # ← classifié par analyze_intent_node
+        "chunks"  : None,   # ← rempli par rag_search_node si besoin
+        "answer"  : None,   # ← rempli par le nœud actif
+        "sources" : [],     # ← rempli par rag_search_node si besoin
+        "steps"   : []      # ← mis à jour à chaque nœud parcouru
+    }
+
+    # ── Invoquer le graphe ──
+    # ainvoke() = version asynchrone de invoke()
+    # exécute tous les nœuds dans l'ordre défini dans graph.py :
+    # START → analyze_intent → [rag_search | direct_answer | chitchat]
+    #       → format_response → END
+    # retourne l'état FINAL après tous les nœuds
+    final_state = await agent_graph.ainvoke(initial_state)
+
+    # ── Construire les sources ──
+    # final_state["sources"] peut être None si pas de RAG
+    # on utilise "or []" pour éviter l'erreur si None
+    sources = [
+        SourceItem(**s)
+        for s in (final_state.get("sources") or [])
+    ]
+
+    # ── Retourner la réponse enrichie ──
+    # on expose intent et steps pour la transparence et le debug
+    # un recruteur peut voir exactement comment l'agent a raisonné
+    return AgentResponse(
+        answer =final_state["answer"],
+        intent =final_state["intent"],
+        sources=sources,
+        steps  =final_state["steps"],
+        model  ="qwen2.5:3b"
     )
