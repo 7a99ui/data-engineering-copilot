@@ -42,3 +42,27 @@ class AgentState(TypedDict):
     # Utile pour le debug et la traçabilité
     # ex: ["analyze_intent", "rag_search", "format_response"]
     steps: list
+    
+    
+    # ── Nouveaux champs Sprint 6 ──
+
+    # La requête SQL générée par le LLM pour sql_executor
+    # None si la question ne nécessite pas de SQL
+    # Rempli par sql_executor_node AVANT l'interruption
+    sql_query: Optional[str]
+
+    # True si l'humain a approuvé l'exécution SQL
+    # False = refusé, None = pas encore décidé
+    sql_approved: Optional[bool]
+
+    # Résultat de l'exécution SQL
+    # dict avec rows, columns, row_count, error
+    sql_result: Optional[dict]
+
+    # Résumé structuré des logs analysés
+    # dict avec error_count, recent_errors, summary...
+    log_analysis: Optional[dict]
+
+    # Informations sur la structure de la DB
+    # dict avec tables, colonnes, types
+    db_info: Optional[dict]
