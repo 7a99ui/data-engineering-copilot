@@ -99,7 +99,7 @@ def create_agent_graph():
             "chitchat"     : "chitchat",      # salutation → réponse courte
             "db_inspect"   : "db_inspect",    # ← Sprint 6 : structure DB
             "sql_query"    : "sql_query_node",     # ← Sprint 6 : exécution SQL
-            "log_analysis" : "log_analyzer",  # ← Sprint 6 : analyse logs
+            "log_analyzer" : "log_analyzer",  # ← Sprint 6 : analyse logs
         }
     )
 
@@ -119,7 +119,7 @@ def create_agent_graph():
         route_after_sql,
 
         {
-            "sql_execute"    : "sql_execute_node",
+            "sql_execute_node"    : "sql_execute_node",
             "format_response": "format_response"
         }
     )

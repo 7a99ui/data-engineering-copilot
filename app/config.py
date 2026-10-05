@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: str = "copilot123"
     POSTGRES_DB: str = "copilot_db"
     POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5432
+    POSTGRES_PORT: int = 5433
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
     APP_HOST: str = "0.0.0.0"      # ← ajouter
