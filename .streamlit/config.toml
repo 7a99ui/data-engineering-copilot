@@ -1,0 +1,10 @@
+# À placer dans : .streamlit/config.toml  (à la racine de ton projet)
+# Redémarre Streamlit après modification.
+
+[theme]
+base = "dark"
+primaryColor = "#6366F1"
+backgroundColor = "#070B16"
+secondaryBackgroundColor = "#0E1426"
+textColor = "#E8ECF8"
+font = "sans serif"
