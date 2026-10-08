@@ -115,6 +115,9 @@ class AgentRequest(BaseModel):
     # True    = approuver l'exécution de la requête SQL
     # False   = refuser l'exécution de la requête SQL
     sql_approved: Optional[bool] = None
+    
+    
+    history     : list[dict] = []   # ← nouveau
 
 
 class AgentResponse(BaseModel):
@@ -146,6 +149,8 @@ class AgentResponse(BaseModel):
     # True si le graphe s'est interrompu et attend une confirmation SQL
     # False dans tous les autres cas
     pending_approval: bool = False
+    
+    sql_result: Optional[dict] = None
 
 
 # ════════════════════════════════════════
@@ -275,6 +280,7 @@ async def agent(request: AgentRequest):
             "sql_result"  : None,   # ← rempli par sql_execute_node si besoin
             "log_analysis": None,   # ← rempli par log_analyzer_node si besoin
             "db_info"     : None,   # ← rempli par db_inspect_node si besoin
+            "history": request.history,
         }
 
         # Invoquer le graphe avec l'état initial et la config de thread
@@ -317,5 +323,7 @@ async def agent(request: AgentRequest):
         sql_query       =final_state.get("sql_query"),
 
         # True si le graphe attend une confirmation SQL humaine
-        pending_approval=pending
+        pending_approval=pending,
+        
+        sql_result      =final_state.get("sql_result")
     )

@@ -115,7 +115,10 @@ def execute_query(query: str, max_rows: int = 50) -> dict:
                 # Exécuter la requête validée
                 # On ajoute LIMIT pour éviter de récupérer des millions de lignes
                 # même si l'utilisateur a oublié de mettre LIMIT dans sa requête
-                limited_query = f"SELECT * FROM ({query}) AS subq LIMIT {max_rows}"
+                # Si la requête se termine par ";" → ça casse "SELECT * FROM (...;) AS subq"
+                clean_query = query.rstrip().rstrip(";").strip()
+                # Envelopper proprement sans point-virgule intermédiaire
+                limited_query = f"SELECT * FROM ({clean_query}) AS subq LIMIT {max_rows}"
                 cur.execute(limited_query)
 
                 # Récupérer toutes les lignes

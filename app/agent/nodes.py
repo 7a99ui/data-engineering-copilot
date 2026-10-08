@@ -16,6 +16,8 @@ from pathlib import Path
 import httpx
 from app.config import settings
 
+from app.agent.tools.sql_utils import extract_sql
+
 
 async def analyze_intent_node(state: dict) -> dict:
     """
@@ -215,15 +217,10 @@ ANSWER:"""
 async def sql_query_node(state: dict) -> dict:
     """
     Nœud SQL Query — génère la requête SQL depuis la question.
-    C'est le nœud AVANT l'interruption Human in the Loop.
-
-    Étapes :
-    1. Récupère la structure DB pour aider le LLM
-    2. Demande au LLM de générer un SELECT
-    3. Valide la requête (SELECT only, pas de DROP/DELETE...)
-    4. Si dangereuse → refuse immédiatement (sql_approved=False)
-    5. Si safe → stocke et attend confirmation (sql_approved=None)
-       LangGraph s'interrompra grâce à interrupt_before=["sql_execute"]
+    Améliorations Phase 7 :
+    - extract_sql() robuste pour extraire la requête du texte LLM
+    - Historique conversationnel pour gérer "fix the query"
+    - Prompt amélioré sans "SQL Query (SELECT only):" qui était recopié
     """
     question = state["question"]
 
@@ -235,17 +232,36 @@ async def sql_query_node(state: dict) -> dict:
         for t in db_info["tables"]
     ])
 
-    # Demander au LLM de générer uniquement la requête SQL
-    # temperature=0.0 → requête déterministe, pas de créativité
-    sql_prompt = f"""Generate a PostgreSQL SELECT query to answer this question.
-Return ONLY the SQL query, nothing else. No explanation, no markdown.
+    # ── Récupérer l'historique conversationnel ──
+    # Permet de gérer "fix the query" ou "it's a select query"
+    # Sans historique → l'agent invente une nouvelle requête sans rapport
+    history = state.get("history", [])
+    history_text = "\n".join(
+        f"{m['role']}: {m['content'][:500]}"
+        for m in history[-6:]   # 6 derniers messages max
+    )
 
-Available tables:
+    # ── Prompt amélioré ──
+    # IMPORTANT : ne pas terminer par "SQL Query (SELECT only):"
+    # Le LLM recopiait cette phrase dans sa réponse → extract_sql la gérait mais
+    # c'était une source d'erreur. On termine par "SQL:" pour guider sans polluer.
+    sql_prompt = f"""You are a PostgreSQL expert. Write ONE read-only SQL query.
+Return ONLY the SQL query. No explanation, no markdown, no labels.
+
+Available tables and columns:
 {tables_summary}
+
+Conversation so far:
+{history_text or '(none)'}
 
 Question: {question}
 
-SQL Query (SELECT only):"""
+Rules:
+- Only SELECT queries are allowed.
+- If the user asks to fix or correct the query, correct the last SQL query from the conversation.
+- To count tables use: SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'
+
+SQL:"""
 
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
@@ -254,21 +270,32 @@ SQL Query (SELECT only):"""
                 "model"  : settings.LLM_MODEL,
                 "prompt" : sql_prompt,
                 "stream" : False,
-                "options": {"temperature": 0.0, "num_predict": 200}
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 300   # ← augmenté pour les requêtes complexes
+                }
             }
         )
         response.raise_for_status()
 
-    # Nettoyer la requête — enlever les backticks markdown si présents
-    sql_query = response.json()["response"].strip()
-    sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
+    # ── B2 : Extraction robuste via extract_sql ──
+    # Gère : texte avant, backticks, texte après, double instruction
+    sql_query = extract_sql(response.json()["response"])
+
+    # Si extract_sql retourne vide → le LLM n'a pas généré de SELECT
+    if not sql_query:
+        return {
+            "sql_query"   : "",
+            "sql_approved": False,
+            "answer"      : "I could not generate a valid SQL query. Please rephrase your question.",
+            "sources"     : [],
+            "steps"       : state["steps"] + ["sql_query", "sql_rejected"]
+        }
 
     # Valider la sécurité AVANT de demander confirmation
-    # évite de présenter une requête dangereuse à l'humain
     is_safe, error_msg = validate_query(sql_query)
 
     if not is_safe:
-        # Requête dangereuse → refus immédiat sans Human in the Loop
         return {
             "sql_query"   : sql_query,
             "sql_approved": False,
@@ -277,9 +304,6 @@ SQL Query (SELECT only):"""
             "steps"       : state["steps"] + ["sql_query", "sql_rejected"]
         }
 
-    # Requête safe → stocker et attendre confirmation humaine
-    # sql_approved=None → route_after_sql retourne "sql_execute"
-    # → LangGraph s'interrompt grâce à interrupt_before=["sql_execute"]
     return {
         "sql_query"   : sql_query,
         "sql_approved": None,

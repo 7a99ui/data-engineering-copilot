@@ -66,3 +66,5 @@ class AgentState(TypedDict):
     # Informations sur la structure de la DB
     # dict avec tables, colonnes, types
     db_info: Optional[dict]
+    
+    history     : Optional[list]   # ← nouveau : historique conversationnel

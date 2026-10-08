@@ -6,6 +6,7 @@
 import html
 import streamlit as st
 import requests
+import pandas as pd
 
 # ══════════════════════════════════════════════════════
 # CONFIGURATION DE LA PAGE (doit être le premier appel Streamlit)
@@ -310,7 +311,7 @@ def _error_result(error: str, answer: str) -> dict:
     }
 
 
-def call_agent(question=None, thread_id=None, sql_approved=None, endpoint="/agent") -> dict:
+def call_agent(question=None, thread_id=None, sql_approved=None, endpoint="/agent", history=None) -> dict:
     """
     Appelle l'API FastAPI.
     - question seule            -> nouvelle question
@@ -323,6 +324,12 @@ def call_agent(question=None, thread_id=None, sql_approved=None, endpoint="/agen
         payload["thread_id"] = thread_id
     if sql_approved is not None:
         payload["sql_approved"] = sql_approved
+    
+    # ── Envoyer les 6 derniers messages pour la mémoire conversationnelle ──
+    # [:-1] exclut la question qu'on vient d'ajouter
+    # pour éviter de l'envoyer deux fois dans le payload
+    if history:
+        payload["history"] = history
 
     try:
         response = requests.post(f"{API_URL}{endpoint}", json=payload, timeout=120)
@@ -351,6 +358,7 @@ def make_assistant_msg(result: dict, default_intent: str = "unknown") -> dict:
         "sql_query": result.get("sql_query"),
         "thread_id": result.get("thread_id"),
         "error": result.get("error"),
+        "sql_result": result.get("sql_result"),
     }
 
 
@@ -442,6 +450,12 @@ def display_message(msg: dict, idx: int):
 
         # Rendu Markdown natif : tableaux, code, listes fonctionnent
         st.markdown(msg["content"])
+        
+        sql_res = msg.get("sql_result")
+        if sql_res and sql_res.get("success") and sql_res.get("rows"):
+            df = pd.DataFrame(sql_res["rows"])
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            st.caption(f"{sql_res.get('row_count', len(df))} row(s) returned")
 
         if msg.get("sources"):
             render_sources(msg["sources"])
@@ -567,7 +581,14 @@ if question:
     with st.chat_message("assistant", avatar=":material/auto_awesome:"):
         with st.spinner("Analyzing your question…"):
             endpoint = "/agent" if st.session_state.mode == "agent" else "/ask"
-            result = call_agent(question=question, endpoint=endpoint)
+            # 6 derniers messages ; [:-1] exclut la question qu'on vient d'ajouter
+            history = [
+                {"role": m["role"], "content": m["content"]}
+                for m in st.session_state.messages[:-1][-6:]
+            ]
+            result = call_agent(question=question, endpoint=endpoint, history=history)
 
-    st.session_state.messages.append(make_assistant_msg(result))
+    st.session_state.messages.append(
+    make_assistant_msg(result, "rag_search" if endpoint == "/ask" else "unknown")
+    )
     st.rerun()
