@@ -460,7 +460,13 @@ def display_message(msg: dict, idx: int):
         if msg.get("sources"):
             render_sources(msg["sources"])
         if msg.get("sql_query"):
-            render_sql_block(msg, idx)
+            if msg.get("pending_approval") or msg.get("sql_status"):
+                # Message en attente ou décidé → affichage complet avec badge
+                render_sql_block(msg, idx)
+            else:
+                # Message de résultat → requête repliée, pas de répétition
+                with st.expander("View executed SQL", icon=":material/code:"):
+                    st.code(msg["sql_query"], language="sql")
 
 
 # ══════════════════════════════════════════════════════
