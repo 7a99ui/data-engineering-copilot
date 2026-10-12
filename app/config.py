@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = 6333
     APP_HOST: str = "0.0.0.0"      # ← ajouter
     APP_PORT: int = 8000            # ← ajouter
+    # LangFuse — optionnel (vide si pas configuré)
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST      : str = "https://cloud.langfuse.com"
 
     class Config:
         env_file = ".env"

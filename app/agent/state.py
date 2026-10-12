@@ -1,6 +1,6 @@
 # TypedDict — permet de définir un dictionnaire avec des types précis
 # LangGraph utilise TypedDict pour définir la structure de l'état
-from typing import TypedDict, Optional
+from typing import Any,TypedDict, Optional
 
 
 class AgentState(TypedDict):
@@ -68,3 +68,6 @@ class AgentState(TypedDict):
     db_info: Optional[dict]
     
     history     : Optional[list]   # ← nouveau : historique conversationnel
+    
+    
+    _lf_trace   : Optional[str]
